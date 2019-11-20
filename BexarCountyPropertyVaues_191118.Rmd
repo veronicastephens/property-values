@@ -1,0 +1,764 @@
+---
+title: "Predicting Bexar County Property Vaues"
+author: "Veronica Stephens"
+date: "November 18, 2019"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document:
+    highlight: zenburn
+editor_options:
+  chunk_output_type: console
+---
+##Import R libraries
+```{r setup, include=TRUE,message=FALSE,warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(AppliedPredictiveModeling)  
+library(lattice)
+library(corrplot) 
+library(pls)
+library(elasticnet)
+library(reshape2)  
+library(RANN)
+library(Hmisc)
+library(gam)
+library(e1071)
+library(NbClust)
+
+```
+
+## Import Data
+```{r echo=TRUE}
+build_data <- read.csv('https://raw.githubusercontent.com/veronicastephens/property-values/master/BCPropertyTrain.txt', header=TRUE, sep='|')
+results_data <- read.csv('https://raw.githubusercontent.com/veronicastephens/property-values/master/BCPropertyTest.txt', header=TRUE, sep='|')
+```
+
+## Data Preprocessing
+```{r echo=TRUE}
+# define varaibles (BCAD: http://www.bcad.org/mapSearch/)
+# AG = attached garage
+# CP = attached carport
+# DCK = attached wood deck
+# DCK2 = attached wood deck second level (?)
+# DCKC = deck with cover
+# ENC = enclosure
+# GAR = detached garage
+# LA = living area
+# LA1 = additional living area
+# LA2 = living area second level
+# OP = attached open porch
+# OP2 = attached open porch second level
+# OPP = detached open porch
+# PA = terrace(patio slab)
+# PAC = patio covered, terrace with cover
+# PTO = detached patio
+# RMS = residential misc shed
+# RSH = shed
+# RSW = swimming pool
+# SPA = spa/hot tub/jacuzzi
+# UTL = attached utility
+# UTL2 = second story utility
+# WD = attached wood deck
+# WDD = detached wood deck
+# eff_front = effective frontage (averaging the frontage and the rear lot line)
+# eff_depth = effective depth (averaging the sidelines)
+# year_built, acres, value, property_id
+
+```
+
+### Explore predictors & response
+```{r include=TRUE,message=FALSE,warning=FALSE}
+# group predictors
+df_1 <- build_data %>% select(AG,CP,GAR,RMS,RSH) #garages and sheds
+df_2 <- build_data %>% select(DCK,DCK2,DCKC,WD,WDD) #wood decks
+df_3 <- build_data %>% select(ENC,UTL,UTL2) #enclosure, utility
+df_4 <- build_data %>% select(LA,LA1,LA2) #living areas
+df_5 <- build_data %>% select(OP,OP2,OPP) #open porch
+df_6 <- build_data %>% select(PA,PAC,PTO,RSW,SPA) #patios, pool, spa
+df_7 <- build_data %>% select(eff_front,eff_depth) #property metrics
+df_8 <- build_data %>% select(year_built) #year
+df_9 <- build_data %>% select(acres) #acres
+df_10 <- build_data %>% select(value) #response variable
+
+# plot predictors, response, and observations
+ggplot(melt(df_1),aes(x=value)) + geom_histogram() + facet_wrap(~variable) + theme_minimal() # CP,RMS look odd
+ggplot(melt(df_2),aes(x=value)) + geom_histogram() + facet_wrap(~variable) + theme_minimal() # DCK2,WD,WDD = 0?
+ggplot(melt(df_3),aes(x=value)) + geom_histogram() + facet_wrap(~variable) + theme_minimal() # ENC,UTL2 =0?
+ggplot(melt(df_4),aes(x=value)) + geom_histogram() + facet_wrap(~variable) + theme_minimal() # LA1 almost no variance
+ggplot(melt(df_5),aes(x=value)) + geom_histogram() + facet_wrap(~variable) + theme_minimal() # OP2, OPP = 0?
+ggplot(melt(df_6),aes(x=value)) + geom_histogram() + facet_wrap(~variable) + theme_minimal() # PTO,SPA = 0?
+ggplot(melt(df_7),aes(x=value)) + geom_histogram() + facet_wrap(~variable) + theme_minimal() # 0 = NA, these variables cannot = 0 (acres != 0)
+ggplot(melt(df_8),aes(x=value)) + geom_histogram() + facet_wrap(~variable) + theme_minimal() # potential outlier
+ggplot(melt(df_9),aes(x=value)) + geom_histogram() + facet_wrap(~variable) + theme_minimal() # 
+
+# answering questions from intial plots above
+# df_1 <- df_1 %>% filter(CP!=0) # only 2 observations 
+# df_1 <- df_1 %>% filter(RMS != 0) # BINARY VARIABLE 
+# df_2 <- df_2 %>% filter(DCK2!=0) # only 2 observations 
+# df_2 <- df_2 %>% filter(WD!=0) # only 3 observations 
+# df_2 <- df_2 %>% filter(WDD!=0) # only 6 observations 
+# df_3 <- df_3 %>% filter(ENC!=0) # only 10 observations
+# df_3 <- df_3 %>% filter(UTL2!=0) # only 1 observations
+# df_4 <- df_4 %>% filter(LA1!=0) # only 12 observations
+# df_5 <- df_5 %>% filter(OP2!=0) # only 3 observations
+# df_5 <- df_5 %>% filter(OPP!=0) # only 3 observations
+# df_6 <- df_6 %>% filter(PTO!=0) # only 3 observations
+# df_6 <- df_6 %>% filter(SPA!=0) # BINARY VARIABLE
+# even if we comine all near 0 variance variables above, only have a variable with 11% of observations
+
+# # examine summary data to confirm RMS, SPA binary
+# summary(build_data) #RMS,SPA variables have a max value of 1
+
+# examine response variable
+ggplot(melt(df_10),aes(x=value)) + geom_histogram() + facet_wrap(~variable) + theme_minimal() 
+# 
+# examine outliers
+ggplot(melt(df_10),aes(x="",y=value)) + geom_boxplot() + facet_wrap(~variable) + theme_minimal() 
+ggplot(build_data,aes(x=acres,y=value)) + geom_point() + theme_minimal()
+#single house built in 2012, 7 year gap from next closest house in 2005, property_id==1010, this observation is unlike any of the others
+ggplot(build_data,aes(x=year_built,y=value)) + geom_point() + theme_minimal() 
+
+
+# property_id==1567,1568 are anaomolies
+# houses with 35k-70k difference in value from similar houses
+acres_df <- build_data %>% filter(acres<=0.28, acres>=0.19) %>% arrange(desc(value))
+ggplot(acres_df,aes(x=acres,y=value)) + geom_point() + theme_minimal()
+build_data <- build_data %>% arrange(desc(year_built))
+build_data <- build_data %>% arrange(value)
+
+# look for missing values in columns & rows
+df_col = data.frame(sapply(build_data, function(x) sum(is.na(x))))
+names(df_col) <- c('missing')
+df_col$names <- rownames(df_col)
+df_col <- df_col %>% arrange(-missing) %>% select(names,missing)
+df_col[1:3,]
+df_rows = data.frame(apply(build_data, 1, function(x) sum(is.na(x))))
+names(df_rows) <- c('missing')
+df_rows$names <- rownames(df_rows)
+df_rows <- df_rows %>% select(names,missing) %>% arrange(-missing)
+df_rows[1:3,]
+# there are no NA values in data set, some NA may instead be 0 values
+
+# plot eff_depth == 0
+# test1 <- df %>% filter(eff_depth==0) %>% filter(eff_front==0)
+# ggplot(test1,aes(x=year_built,y=value)) + geom_point() + theme_minimal()
+# no pattern of missingness
+
+
+# look at correlation plot
+# using default pearson correlation
+correlations <- cor(build_data)
+corrplot::corrplot(correlations,order='hclust',type='lower',tl.cex=1)
+print(round(cor(build_data),digits = 2))
+# notes
+# GAR, AG high negative correlation (r=-0.78)
+# LA2,LA high moderate positive correlation (-0.57)
+# acres, value high positive correlation, note value is predictor variable
+# eff_depth, eff_front highly positively (r=0.95)correlated and removed in df10 models
+
+rm(df_1,df_2,df_3,df_4,df_5,df_6,df_7,df_8,df_9,df_10,acres_df,df_col,df_rows,correlations)
+
+```
+
+### Conclusions
+```{r}
+# remove: property_id == 1010,1567,1568
+# 0 = NA for eff_front,eff_depth, approximately 33% missing for each predictor
+# eff_front*eff_depth=area(sf)=acres, try to impute, remove, and keep in model measure accuracy
+# RMS and SPA are binary, convert to factors
+# center and scale acres,OP,LA2 (if not using caret train fn)
+
+# will define sets of predictors based on above conclusions (df# = # predictors):
+# df29 (remove value/response variable)
+# df28 (remove property_id,value)
+# df12 (remove degenerate variables,property_id,value)
+# df11 (remove eff_front,eff_depth,degenerate variables,value)
+# df10 (remove eff_front,eff_depth,degenerate variables,property_id,value)
+
+```
+
+### Changes
+```{r}
+# define df29, df28
+# change binary variables, delete outlier property_ids, remove property_id as predictor
+df <- build_data
+
+df29 <- df %>% 
+  mutate(RMS = as.factor(RMS), # change binary variables to factors
+         SPA = as.factor(SPA)) %>% 
+  filter(!property_id %in% c(1010,1567,1568))  #remove outliers
+
+df28 <- df %>% 
+  mutate(RMS = as.factor(RMS), # change binary variables to factors
+         SPA = as.factor(SPA)) %>% 
+  filter(!property_id %in% c(1010,1567,1568)) %>%  #remove outliers
+  select(-property_id) # property_id not useful in predicting value
+
+# df12 & df10 defined after nzv() next chunk
+
+ggplot(df29,aes(x="",y=value)) + geom_boxplot() + theme_minimal() # examine outliers
+ggplot(df29,aes(x=acres,y=value)) + geom_point() + theme_minimal()
+ggplot(df29,aes(x=year_built,y=value)) + geom_point() + theme_minimal() 
+
+
+# property_id==1567,1568 are anaomolies
+# houses with 35k-70k difference in value from similar houses
+acres_df <- build_data %>% filter(acres<=0.28, acres>=0.19) %>% arrange(desc(value))
+ggplot(acres_df,aes(x=acres,y=value)) + geom_point() + theme_minimal()
+
+```
+
+### Degenerate variables
+```{r}
+# check for degenerate variables
+vars_nzv <- nearZeroVar(df)
+# keep binary variables, SPA, RMS, column # 17,20
+vars_nzv <- vars_nzv[-11]
+vars_nzv <- vars_nzv[-13]
+df_new <- df[,-vars_nzv]
+dim(df) #29
+dim(df_new) #13
+pred_vars <- names(df_new)
+length(pred_vars) #-property_id,-value
+pred_vars
+# started with 29 predictors, now have 12 (-value,-property_id):
+# AG, DCK, LA, LA2, OP, PA, RMS, SPA, year_built, acres, eff_front, eff_depth, property_id
+
+# predictor variables after removing degenerate variables
+df12 <- df28 %>% select('AG','DCK','LA','LA2','OP','PA','RMS','SPA','year_built',
+                        'acres','eff_front','eff_depth','value') 
+
+df10 <- df12 %>% select(-eff_depth,-eff_front)
+
+df11 <- df29 %>% select('AG','DCK','LA','LA2','OP','PA','RMS','SPA','year_built',
+                        'acres','property_id','value')
+
+# look at correlation plots again
+# using default pearson correlation
+for (i in list(df12,df11,df10)){
+  df_corr <- i %>% select(-RMS,-SPA)
+  correlations <- cor(df_corr)
+  corrplot::corrplot(correlations,order='hclust',type='lower',tl.cex=1)
+  print(round(cor(df_corr),digits = 2))
+}
+# notes
+# LA, LA2 moderately negatively correlated (r=-0.57)
+# eff_depth, eff_front highly positively (r=0.95)correlated and removed in df10 models
+
+
+rm(df_new,vars_nzv,pred_vars,df_corr,correlations)
+
+
+```
+
+### Removing predictors & imputing values
+```{r}
+# tried both of these, they did not impact model performance
+
+# based on first linear, rf models removing: DCK,PA,RMS1 (not signifcant and low importance)
+# df <- df %>% select(-DCK,-PA,-RMS)
+
+# imputing eff_front, eff_depth
+# # tried: this did not impact model performance
+# # impute missing values in eff_front,eff_depth
+# df <- df %>% mutate(eff_front=ifelse(eff_front==0,NA,eff_front),
+#                     eff_depth=ifelse(eff_depth==0,NA,eff_depth))
+# 
+# df_prepro <- df %>% select(-value)
+# preprocess_vals <- preProcess(df_prepro, method = c("spatialSign"))
+# df_impute <- predict(preprocess_vals,df_prepro)
+# df <- df_impute
+
+
+```
+
+## Sample Selection - Generate a Training and Test Set
+```{r echo=TRUE}
+# function to split data, some models will not run with degenerate variables
+split.data <- function(df){
+  
+  set.seed(775546)
+  train_idx <- createDataPartition(df$value, p=0.75, list=FALSE)
+  
+  df_train <- df[train_idx,]
+  df_test <- df[-train_idx,]
+  
+  out = list()
+  out$train_pred = df_train %>% select(-value)
+  out$train_resp = df_train %>% select(value)
+  out$test_pred = df_test %>% select(-value)
+  out$test_resp = df_test %>% select(value)
+  
+  return(out)
+}
+
+```
+
+## Model Building / Training / Tuning
+```{r}
+# get to evaluate performance measure like RMSE
+mean_value <- mean(df29$value)
+median_value <- median(df29$value)
+n_train <- ceiling(nrow(df29) *.75)
+n_test <- nrow(df29) - n_train
+
+# define functions to calculate model performance
+MSE <- function(error) {mean(error^2)}
+RMSE <- function(error) {sqrt(mean(error^2))}
+MAE <- function(error) {mean(abs(error))}
+R2 <- function(error,df) {1-(sum(error^2)/sum((df$value-mean(df$value))^2))} #specify df # aR2 <- function(error,df,k,n) {(R2(error,df))-(((k-1)/(n-k))*(1-R2(error,df)))} #specify df 
+
+# define list of dataframes and placeholders to store model performance
+toModelList <- list(df29,df28,df12,df10,df11)
+y <- length(toModelList)
+df_results <- data.frame(mse_train=rep(NA,y),rmse_train=rep(NA,y),
+                          mae_train=rep(NA,y), r2_train=rep(NA,y),
+                          rmsesd_train=rep(NA,y), mse_test=rep(NA,y),
+                          rmse_test=rep(NA,y), mae_test=rep(NA,y), 
+                          r2_test=rep(NA,y), model=rep(NA,y),
+                          num_pred=c(29,28,12,10,11))
+
+# define function
+tune.length.fn = function (k_pred){
+  
+  k = ifelse(k_pred==29,28,
+     ifelse(k_pred==28,27,
+            ifelse(k_pred==12,11,
+                   ifelse(k_pred==10,9,6))))
+  return(k)
+}
+
+```
+
+### Linear Model Fn
+```{r include=TRUE,message=FALSE,warning=FALSE}
+# define linear model function
+mod.lm.fn <- function(mod_results,dfList) {
+  
+  # dfList= toModelList #debug
+  # mod_results = df_results #debug
+  
+  # define model type
+  mod_results$model=c('LM')
+
+  # iterate through list of dataframes
+  for (x in unique(dfList)){
+
+    # x=df10 #debug
+    k_pred <- ncol(x)-1
+    split = split.data(x) #x=data frame to split data on
+
+    set.seed(289)
+    control <- trainControl(method='repeatedcv',number=10) #resampling method
+    # control <- trainControl(method='boot',number=25) #resampling method
+
+    tuneLength.num = tune.length.fn(k_pred)
+
+    # remove binary predictors
+    train_pred_2 <- split$train_pred %>% select(-SPA,-RMS) #train_pred
+    test_pred_2 <- split$test_pred %>% select(-SPA,-RMS) #test_pred
+    
+    lm_fit <- train(x=train_pred_2, y=split$train_resp$value, method="lm",
+                    preProc=c("center","scale"), tuneLength=tuneLength.num,
+                    trControl=control) #na.action=na.omit
+    # summary(lm_fit)
+    # plot(lm_fit$finalModel$fitted.values,lm_fit$finalModel$residuals,main=paste('OLS ',k_pred))
+  
+    # train model performance
+    mod_results[mod_results$num_pred==k_pred,"mse_train"] = (lm_fit$results$RMSE)^2
+    mod_results[mod_results$num_pred==k_pred,"rmse_train"] = lm_fit$results$RMSE
+    mod_results[mod_results$num_pred==k_pred,"mae_train"] = lm_fit$results$MAE
+    mod_results[mod_results$num_pred==k_pred,"r2_train"] = lm_fit$results$Rsquared
+    mod_results[mod_results$num_pred==k_pred,"rmsesd_train"] = c('NA')
+    # predict on test set and test model performance
+    test_error <- split$test_resp$value - predict(lm_fit,newdata=test_pred_2)
+    mod_results[mod_results$num_pred==k_pred,"mse_test"] = MSE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"rmse_test"] = RMSE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"mae_test"] = MAE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"r2_test"] = R2(test_error,split$test_resp)
+    # mod_results[mod_results$num_pred==k_pred,"rmsesd_test"] = c('NA')
+  }
+  # define model value
+  return(mod_results)
+}
+
+```
+
+### Random Forest Fn
+```{r include=TRUE,message=FALSE,warning=FALSE}
+# define RF model function
+mod.rf.fn <- function(mod_results,dfList) {
+  
+  # define model type
+  mod_results$model=c('RF')
+  
+  # iterate through list of dataframes
+  for (x in unique(dfList)){
+  
+    # x=df10 #debug
+    k_pred <- ncol(x)-1
+    split = split.data(x) #x=data frame to split data on
+  
+    set.seed(289)
+    control <- trainControl(method='repeatedcv',number=10) #resampling method
+    # control <- trainControl(method='boot',number=15) #resampling method
+  
+    tuneLength.num = tune.length.fn(k_pred)
+
+  
+    rf_fit = train(x=split$train_pred, y=split$train_resp$value, method = "rf",
+                   trControl=control,tuneLength=tuneLength.num,
+                   ntree=1000, importance=TRUE) #na.action = na.omit
+  
+    mtry <- rf_fit$bestTune[1,1]
+    # rf_fit$results
+    # plot(rf_fit$) #,main=paste('RF ',k_pred))
+  
+  
+    # train model performance
+    mod_results[mod_results$num_pred==k_pred,"mse_train"] = (rf_fit$results[rf_fit$results$mtry==mtry,"RMSE"])^2
+    mod_results[mod_results$num_pred==k_pred,"rmse_train"] = rf_fit$results[rf_fit$results$mtry==mtry,"RMSE"]
+    mod_results[mod_results$num_pred==k_pred,"mae_train"] = rf_fit$results[rf_fit$results$mtry==mtry,"MAE"]
+    mod_results[mod_results$num_pred==k_pred,"r2_train"] = rf_fit$results[rf_fit$results$mtry==mtry,"Rsquared"]
+    mod_results[mod_results$num_pred==k_pred,"rmsesd_train"] = c('NA')
+    # predict on test set and test model performance
+    test_error <- split$test_resp$value - predict(rf_fit,newdata=split$test_pred)
+    mod_results[mod_results$num_pred==k_pred,"mse_test"] = MSE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"rmse_test"] = RMSE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"mae_test"] = MAE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"r2_test"] = R2(test_error,split$test_resp)
+    # mod_results[mod_results$num_pred==k_pred,"rmsesd_test"] = c('NA')
+  }
+  return(mod_results)
+}
+
+```
+
+### GAM Model Fn
+```{r include=TRUE,message=FALSE,warning=FALSE}
+# define gam model function
+mod.gam.fn <- function(mod_results,dfList) {
+  
+  # define model type
+  mod_results$model=c('GAM')
+  
+  # iterate through list of dataframes
+  for (x in unique(dfList)){
+  
+    # x=df28 #debug
+    k_pred <- ncol(x)-1
+    split = split.data(x) #x=data frame to split data on
+    
+    set.seed(149)
+    control <- trainControl(method='repeatedcv',number=10) #resampling method
+    # control <- trainControl(method='boot',number=25) #resampling method
+  
+    tuneLength.num = tune.length.fn(k_pred)
+
+    gam_fit <- gam(split$train_resp$value ~., data=split$train_pred, family = 'gaussian')
+    
+    # summary(gam_fit)
+    # plot(gam_fit$fitted.values,gam_fit$residuals,main=paste('GAM ',k_pred))
+  
+    # train model performance
+    mod_results[mod_results$num_pred==k_pred,"mse_train"] = MSE(gam_fit$residuals)
+    mod_results[mod_results$num_pred==k_pred,"rmse_train"] = RMSE(gam_fit$residuals)
+    mod_results[mod_results$num_pred==k_pred,"mae_train"] = MAE(gam_fit$residuals)
+    mod_results[mod_results$num_pred==k_pred,"r2_train"] = R2(gam_fit$residuals,split$train_resp)
+    mod_results[mod_results$num_pred==k_pred,"rmsesd_train"] = c('NA')
+    # predict on test set and test model performance
+    test_error <- split$test_resp$value - predict(gam_fit,split$test_pred)
+    mod_results[mod_results$num_pred==k_pred,"mse_test"] = MSE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"rmse_test"] = RMSE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"mae_test"] = MAE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"r2_test"] = R2(split$test_error,split$test_resp)
+    # mod_results[mod_results$num_pred==k_pred,"rmsesd_test"] = c('NA')
+  }
+  return(mod_results)
+}
+
+```
+
+### SVM Model Fn
+```{r include=TRUE,message=FALSE,warning=FALSE}
+# define SVM model function
+mod.svm.fn <- function(mod_results,dfList) {
+  # dfList= toModelList #debug
+  # mod_results = df_results #debug
+  
+  # define model type
+  mod_results$model=c('SVM')
+  
+  # iterate through list of dataframes
+  for (x in unique(dfList)){
+  
+    # x=df28 #debug
+    k_pred <- ncol(x)-1
+    split = split.data(x) #x=data frame to split data on
+    
+    set.seed(158)
+    control <- trainControl(method='repeatedcv',number=10) #resampling method
+    # control <- trainControl(method='boot',number=25) #resampling method
+  
+    tuneLength.num = tune.length.fn(k_pred)
+
+    # remove binary predictors
+    train_pred_2 <- split$train_pred %>% select(-SPA,-RMS)
+    test_pred_2 <- split$test_pred %>% select(-SPA,-RMS)
+    
+    svm_tune = tune(svm, train.y=split$train_resp$value, train.x=train_pred_2, kernel = "radial", #linear/radial
+                    # tunecontrol=tune.control(sampling="boot",nboot=25),
+                    tunecontrol=tune.control(sampling='cross',cross=10),
+                    ranges=list(cost = c(0.001, 0.01, 20), # .1, 1, 1.5, 10
+                                  gamma = c(0.01, 0.1, 1, 5))) #0.05
+    # summary(svm_tune)
+    svm_fit = svm_tune$best.model
+    # plot(svm_fit$fitted,svm_fit$residuals,main=paste('SVM ',k_pred))
+  
+    # train model performance
+    mod_results[mod_results$num_pred==k_pred,"mse_train"] = MSE(svm_fit$residuals)
+    mod_results[mod_results$num_pred==k_pred,"rmse_train"] = RMSE(svm_fit$residuals)
+    mod_results[mod_results$num_pred==k_pred,"mae_train"] = MAE(svm_fit$residuals)
+    mod_results[mod_results$num_pred==k_pred,"r2_train"] = R2(svm_fit$residuals,split$train_resp)
+    mod_results[mod_results$num_pred==k_pred,"rmsesd_train"] = c('NA')
+    # predict on test set and test model performance
+    test_error = split$test_resp$value - predict(svm_fit,test_pred_2)
+    mod_results[mod_results$num_pred==k_pred,"mse_test"] = MSE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"rmse_test"] = RMSE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"mae_test"] = MAE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"r2_test"] = R2(test_error,split$test_resp)
+    # mod_results[mod_results$num_pred==k_pred,"rmsesd_test"] = c('NA')
+  }
+  return(mod_results)
+}
+
+```
+
+<!-- use linear SVMs (or logistic regression) for linear problems, and nonlinear kernels such as the Radial Basis Function kernel for non-linear problems -->
+
+### GLM Model Fn
+```{r include=TRUE,message=FALSE,warning=FALSE}
+# define GLM model function
+mod.glm.fn <- function(mod_results,dfList) {
+  
+  # define model type
+  mod_results$model=c('GLM')
+  
+  # iterate through list of dataframes
+  for (x in unique(dfList)){  
+  
+    # x=df29 #debug
+    k_pred <- ncol(x)-1
+    split = split.data(x) #x=data frame to split data on
+    
+    set.seed(149)
+    control <- trainControl(method='repeatedcv',number=10) #resampling method
+    # control <- trainControl(method='boot',number=25) #resampling method
+  
+    tuneLength.num = tune.length.fn(k_pred)
+
+    glm_fit = train(x=split$train_pred, y=split$train_resp$value, method="glm",
+                    trControl=control, tuneLength=tuneLength.num) #na.action=na.omit
+    
+    # summary(glm_fit)
+    # glm_fit$finalModel
+    # plot(glm_fit$finalModel$fitted.values,glm_fit$finalModel$residuals,main=paste('GLM ',k_pred))
+  
+    # train model performance
+    glm_fit_error = glm_fit$finalModel$residuals
+    mod_results[mod_results$num_pred==k_pred,"mse_train"] = MSE(glm_fit_error)
+    mod_results[mod_results$num_pred==k_pred,"rmse_train"] = RMSE(glm_fit_error)
+    mod_results[mod_results$num_pred==k_pred,"mae_train"] = MAE(glm_fit_error)
+    mod_results[mod_results$num_pred==k_pred,"r2_train"] = R2(glm_fit_error,split$train_resp)
+    mod_results[mod_results$num_pred==k_pred,"rmsesd_train"] = c('NA')
+    # predict on test set and test model performance
+    test_error = split$test_resp$value - predict(glm_fit,split$test_pred)
+    mod_results[mod_results$num_pred==k_pred,"mse_test"] = MSE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"rmse_test"] = RMSE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"mae_test"] = MAE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"r2_test"] = R2(test_error,split$test_resp)
+    # mod_results[mod_results$num_pred==k_pred,"rmsesd_test"] = c('NA')
+  }
+  return(mod_results)
+}
+
+```
+
+### Earth Model Fn
+```{r include=TRUE,message=FALSE,warning=FALSE}
+# define Earth model function
+mod.earth.fn <- function(mod_results,dfList) {
+  
+  # define model type
+  mod_results$model=c('GLM')
+  
+  # iterate through list of dataframes
+  for (x in unique(dfList)){ 
+  
+    # x=df6 #debug
+    k_pred <- ncol(x)-1
+    split = split.data(x) #x=data frame to split data on
+    
+    set.seed(694)
+    control <- trainControl(method='repeatedcv',number=10) #resampling method
+    # control <- trainControl(method='boot',number=25) #resampling method
+  
+    tuneLength.num = tune.length.fn(k_pred)
+    
+    earth_fit = train(x=split$train_pred, y=split$train_resp$value, method="earth",
+                      trControl=control, tuneLength=tuneLength.num, 
+                      preProc = c("center", "scale")) #na.action = na.omit
+    
+    # earth_fit$results
+    plot(earth_fit$finalModel$fitted.values,earth_fit$finalModel$residuals,main=paste('EARTH ',k_pred))
+  
+    # train model performance
+    nprune_best = earth_fit$bestTune[1,1]
+    mod_results[mod_results$num_pred==k_pred,"mse_train"] = (earth_fit$results[earth_fit$results$nprune==nprune_best,"RMSE"])^2
+    mod_results[mod_results$num_pred==k_pred,"rmse_train"] = earth_fit$results[earth_fit$results$nprune==nprune_best,"RMSE"]
+    mod_results[mod_results$num_pred==k_pred,"mae_train"] = earth_fit$results[earth_fit$results$nprune==nprune_best,"MAE"]
+    mod_results[mod_results$num_pred==k_pred,"r2_train"] = earth_fit$results[earth_fit$results$nprune==nprune_best,"Rsquared"]
+    mod_results[mod_results$num_pred==k_pred,"rmsesd_train"] = earth_fit$results[earth_fit$results$nprune==nprune_best,"RMSESD"]
+    # predict on test set and test model performance
+    test_error = split$test_resp$value - predict(earth_fit,newdata=split$test_pred)
+    mod_results[mod_results$num_pred==k_pred,"mse_test"] = MSE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"rmse_test"] = RMSE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"mae_test"] = MAE(test_error)
+    mod_results[mod_results$num_pred==k_pred,"r2_test"] = R2(test_error,split$test_resp)
+    # mod_results[mod_results$num_pred==k_pred,"rmsesd_test"] = c('NA')
+  }
+  return(mod_results)
+}
+
+```
+
+## Run Models
+```{r include=TRUE,message=FALSE,warning=FALSE}
+# call model functions
+
+# LM
+lm_results <- mod.lm.fn(mod_results=df_results,dfList=toModelList)
+print(lm_results)
+# notes:
+# warnings with degenerate varaibles (df29,df28), results misleading
+# many pred not significant: PA, DCK (SPA, RMS not included in model)
+
+# RF
+rf_results <- mod.rf.fn(mod_results=df_results,dfList=toModelList)
+print(rf_results)
+# notes:
+#    9    11963.90  0.8713490   8014.696 (mtry,RMSE,R2,MAE) #10 predictors
+#   24 12142.13 0.8814516  8429.137 1120.983 0.01929514  673.9685 #all predictors
+# rf_fit$finalModel$mse
+
+# GAM
+gam_results <- mod.gam.fn(mod_results=df_results,dfList=toModelList)
+print(gam_results)
+# notes:
+# df28,df29 error:   prediction from a rank-deficient fit may be misleading
+
+# SVM
+svm_results <- mod.svm.fn(mod_results=df_results,dfList=toModelList)
+print(svm_results)
+# notes:
+# does not like the constant variables, use with df12
+# r2 negative for df29,df28, these are unstable models anyway, can change calculation for R2
+# 12 predictor variables
+# mse_train rmse_train mae_train aR2_train mse_test rmse_test mae_test aR2_test model
+# 84403541    9187.14  6183.161 0.9239622 83087669  9115.244  6541.99      NaN   SVM
+
+# GLM
+glm_results <- mod.glm.fn(mod_results=df_results,dfList=toModelList)
+print(glm_results)
+# notes:
+# df29,df28 error: prediction from a rank-deficient fit may be misleading
+# RMSE      Rsquared   MAE     
+# 9400.416  0.9192323  7195.358
+
+# EARTH
+earth_results <- mod.earth.fn(mod_results=df_results,dfList=toModelList)
+print(earth_results)
+# notes:
+# 16       9238.712  0.9211291   6697.297 (nprune,RMSE,R2,MAE)
+# warnings with degenerate varaibles (df29,df28), DCK2,CP have zero variance
+
+```
+
+## Model Selection
+```{r echo=TRUE}
+# # model results:
+# linear combinations: lm_results; glm_results
+# not linear combination of predictors: rf_results; gam_results; earth_results; svm_results
+
+# combine all model results
+all_results <- rbind(lm_results,glm_results,rf_results,gam_results,svm_results,earth_results) 
+all_results <- all_results %>% select(model,num_pred,everything()) %>% arrange(rmse_test)
+all_results
+# final model
+all_results[7,]
+
+# summary
+n_train; n_test
+# nrow(build_data) #608 obs
+# nrow(df28) #605 obs, removed outliers
+# k number of predictors: 29,28,12,10
+
+# removed binary SPA,RMS out of models
+# linear, svm, 
+
+```
+The data is split into test and train sets, containing 456 and 149 of the 605 original observations respectively. Regression models considered include: Ordinary least squares, generalized linear model, random forest, Generalized additive model, support vector machine, and multivariate adaptive regression splines (using earth).
+
+Multiple models were run for each regression model containing 29,28,12,11,and 10 predictors (num_pred in all_results table). The models with 29 and 28 predictors consistently generated warnings about the degenerate variables warning to interpret results with caution. These models are most likely unstable. The 12 predictor models do not contain any degenerate variables. The 10 predictor models remove the effective frontage and depth property lengths from the 12 predictors (eff_front,eff_depth). The 11 predictor model is generated by adding property id back into the model. This was done to see if the variable contained any predictive information, potentially containing information about property location and adjacencies if the area is part of a community plan. The two binary predictors, RMS and SPA (residential misc shed, spa/hot tub/jacuzzi), were not considered in the linear and SVM models.
+
+
+## What is the expected accuracy of your approach (R^2 / RMSE / MAE etc.)?
+```{r echo=TRUE}
+# accuracy of approach
+# context
+all_results[7,4]/median_value
+all_results[7,4]/mean_value
+
+```
+The earth model with 11 predictor variables has a test RMSE of $8,472.24, approximately 4% of the median home value in the data set.
+
+## Predict the House Values for `results_data` 
+```{r echo=TRUE}
+# transform results_data to match model selected, df11
+test_results <- results_data %>% 
+  mutate(RMS = as.factor(RMS), # change binary variables to factors
+         SPA = as.factor(SPA)) %>% 
+  select('AG', 'DCK', 'LA','LA2', 'OP', 'PA', 'RMS', 'SPA',
+         'year_built', 'acres', 'property_id')
+    
+test_results[,"property_id"] #2001,2002,2003,2004,2005
+
+# earth model
+k_pred <- ncol(df11)-1
+split = split.data(df11) #x=data frame to split data on
+test_pred_final <- rbind(split$test_pred,test_results)
+
+set.seed(694)
+control <- trainControl(method='repeatedcv',number=10) #resampling method
+tuneLength.num = tune.length.fn(k_pred)
+
+  
+earth_fit = train(x=split$train_pred, y=split$train_resp$value, method="earth",
+                    trControl=control, tuneLength=tuneLength.num, 
+                    preProc = c("center", "scale")) #na.action = na.omit
+  
+# predict results_data
+value <- predict(earth_fit,newdata=test_pred_final)
+# predict(earth_fit,newdata=test_results)
+# names(test_results)
+value <- value[150:154,]
+print(value)
+
+results_data_values <- cbind(results_data,value)
+# results_data_values
+
+```
+
